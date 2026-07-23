@@ -3,7 +3,6 @@ import requests_cache
 from retry_requests import retry
 import openmeteo_requests
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 import holidays
 from sklearn.linear_model import LinearRegression 
@@ -13,6 +12,8 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 import sys
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 ###Classes and Functions
 
@@ -61,7 +62,9 @@ filedir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() 
 demanddir = os.path.join(filedir, "Data - National Demand")
 weathdir = os.path.join(filedir, "Data - Weather")
 resultsdir = os.path.join(filedir, "Results")
+imagesdir = os.path.join(filedir, "Images")
 weathfile = os.path.join(weathdir, "weather.csv")
+os.makedirs(imagesdir, exist_ok=True)
 os.makedirs(demanddir, exist_ok=True)
 os.makedirs(weathdir, exist_ok=True)
 os.makedirs(resultsdir, exist_ok=True)
@@ -116,7 +119,7 @@ for df in dfs:
 hols=holidays.country_holidays("GB", subdiv = "ENG", years = range(2016,2027))
 for year, df in zip(years, dfs):
     df["HOLIDAY"] = df["SETTLEMENT_DATE"].dt.date.isin(hols)
-
+print(">>>National power demand data identified and processed")
 
 
 
@@ -137,7 +140,7 @@ while True:
         url = "https://archive-api.open-meteo.com/v1/archive"
         params = {
             "latitude": 52.68,
-            "longitude": 1.54,
+            "longitude": -1.54,
             "start_date": "2016-01-01",
             "end_date": "2026-07-15",
             "hourly": ["apparent_temperature", "cloud_cover"],
@@ -166,12 +169,20 @@ while True:
 
         hourly_dataframe = pd.DataFrame(data = hourly_data)
         hourly_dataframe.to_csv(weathfile, index = False)
+        print(">>>Weather data downloaded\n")
         break
 
     elif weather_choice in ("n", "no"):
+        if Path(weathfile).exists():
+            weatherdata = pd.read_csv(weathfile)
+            print(">>>Weather data loaded from folder\n")
+        else:
+            print("Please restart the program and download the weather data to continue.")
+            sys.exit(0)
         break
     else:
         print("Please answer y/n.")
+
 
 ###Process weather data
 weather = pd.read_csv(weathfile)
@@ -201,7 +212,7 @@ demanddata = demanddata.merge(weather, on = ["SETTLEMENT_PERIOD", "SETTLEMENT_DA
 
 ###Baseline Naive Model
 
-baseline = demanddata
+baseline = demanddata.copy()
 baseline["predyesterday"] = baseline.groupby("SETTLEMENT_PERIOD")["ND"].shift(1) #1 day prediction
 baseline["predlastweek"]  = baseline.groupby("SETTLEMENT_PERIOD")["ND"].shift(7) #1 week prediction
 
@@ -211,6 +222,10 @@ baseweekper = (abs(evaldat["ND"] - evaldat["predlastweek"]) / evaldat["ND"]).mea
 baseweekrms = ((evaldat["ND"] - evaldat["predlastweek"])**2).mean()**0.5
 basedayper = (abs(evaldat["ND"] - evaldat["predyesterday"]) / evaldat["ND"]).mean() * 100
 basedayrms = ((evaldat["ND"] - evaldat["predyesterday"])**2).mean()**0.5
+
+print("Baseline Naive Models:")
+print(f'Week baseline: Error % - {baseweekper: .2f}% | RMS - {baseweekrms:.2f}')
+print(f'Day baseline: Error % - {basedayper: .2f}% | RMS - {basedayrms:.2f}\n')
 
 ###Feature Engineering
 
@@ -241,14 +256,14 @@ demanddata = demanddata.dropna(subset=["nd_lag7d", "hdd"])
 
 ###Linear Regression Model
 
-lindata = demanddata.drop(columns = ["HOUR", "DAY","MONTH","YEAR","SETTLEMENT_PERIOD","predyesterday","predlastweek"])
+lindata = demanddata.drop(columns = ["HOUR", "DAY","MONTH","YEAR","SETTLEMENT_PERIOD"])
 xcols = ["SIN_PERIOD", "COS_PERIOD", "SIN_DOY", "COS_DOY", "WEEKEND", "HOLIDAY", "hdd", "apparent_temperature", "cloud_cover", "nd_lag1d", "nd_lag7d", "nd_prevdaymean"]
 ycols = "ND"
 
 lindata = lindata.dropna(subset=xcols) #Remove na in lag data from missing NESO data
 
 train = lindata[lindata["SETTLEMENT_DATE"] <"2024-01-01"]
-test = lindata[lindata["SETTLEMENT_DATE"] >="2025-01-01" & (df["SETTLEMENT_DATE"] < "2026-01-01")]
+test = lindata[(lindata["SETTLEMENT_DATE"] >="2025-01-01") & (lindata["SETTLEMENT_DATE"] < "2026-01-01")]
 
 linmod = LinearRegression().fit(train[xcols], train[ycols])
 predictions = linmod.predict(test[xcols])
@@ -256,17 +271,18 @@ predictions = linmod.predict(test[xcols])
 linerperc = (abs(test[ycols] - predictions) / test[ycols]).mean()*100
 linrms = ((test[ycols] - predictions)**2).mean()**0.5
 
+print(f'Linear Regression: Error % - {linerperc: .2f}% | RMS - {linrms:.2f}')
 
 ###Grad Boosted Model
 
-graddata = demanddata.drop(columns = ["HOUR", "DAY","MONTH","YEAR","predyesterday","predlastweek"])
-
+graddata = demanddata.drop(columns = ["HOUR", "DAY","MONTH","YEAR"])
+graddata = graddata.dropna(subset = xcols)
 y = ycols
 X = xcols + ["DoW"] + ["SETTLEMENT_PERIOD"]
 
 train = graddata[graddata["SETTLEMENT_DATE"] < "2024-01-01"]
 val   = graddata[(graddata["SETTLEMENT_DATE"] >= "2024-01-01") & (graddata["SETTLEMENT_DATE"] < "2025-01-01")]
-test  = graddata[graddata["SETTLEMENT_DATE"] >= "2025-01-01" & (df["SETTLEMENT_DATE"] < "2026-01-01")]
+test  = graddata[(graddata["SETTLEMENT_DATE"] >= "2025-01-01") & (graddata["SETTLEMENT_DATE"] < "2026-01-01")]
 
 gradboomod = xgboost.XGBRegressor(n_estimators = 1000,
                                 max_depth = 6,
@@ -276,11 +292,13 @@ gradboomod = xgboost.XGBRegressor(n_estimators = 1000,
                                 random_state = 42)
 
 
-gradboomod.fit(train[X], train[y], eval_set = [(val[X], val[y])], verbose = 80)
+gradboomod.fit(train[X], train[y], eval_set = [(val[X], val[y])], verbose = False)
 
 y_preds = gradboomod.predict(test[X])
 gbmperc = (abs(test[y] - y_preds) / test[y]).mean()*100
 gbmrms = ((test[y] - y_preds)**2).mean()**0.5
+
+print(f'Gradient Boosted Model: Error % - {gbmperc: .2f}% | RMS - {gbmrms:.2f}')
 
 #Record Results
 xgboosttab = test.copy()
@@ -320,8 +338,18 @@ for m in months:
                 rolled.append({"month": m, "Error%": rollperc, "RMS": rollmrms})
 rolltable = pd.DataFrame(rolled).set_index("month")
 
+fig, ax = plt.subplots(figsize=(8, 4))
+rolltable["Error%"].plot(marker="o", ax=ax, title="Day-ahead MAPE by month (rolling retrain)")
+ax.set_ylabel("MAPE (%)")
+ax.set_xlabel("Month")
+fig.tight_layout()
+fig.savefig(os.path.join(imagesdir, "rolling_mape_by_month.png"), dpi=150)
+plt.close(fig)
+
+print(f"\nDay-ahead Error % by month rolling forward for retrain by month plotted, saved to 'rolling_mape_by_month.png")
+
 ###RNN Model
-nndata = demanddata.drop(columns = ["YEAR", "MONTH", "DAY", "HOUR", "DoY", "cloud_cover", "predyesterday", "predlastweek", "SIN_PERIOD", "COS_PERIOD", "nd_lag1d", "nd_lag7d", "nd_prevdaymean"]).copy()
+nndata = demanddata.drop(columns = ["YEAR", "MONTH", "DAY", "HOUR", "DoY", "cloud_cover", "SIN_PERIOD", "COS_PERIOD", "nd_lag1d", "nd_lag7d", "nd_prevdaymean"]).copy()
 
 #normalise based on training data
 
@@ -380,7 +408,7 @@ test_dataloader = DataLoader(test_data,
                              )
 
 #Check this
-print(f"Dataloaders: {train_dataloader, val_dataloader, test_dataloader}")
+print(f"\nLoading data into data loaders for LSTM model training...")
 print(f"Length of train dataloader: {len(train_dataloader)} batches of {BATCH_SIZE}")
 print(f"Length of val dataloader: {len(val_dataloader)} batches of {BATCH_SIZE}")
 print(f"Length of test dataloader: {len(test_dataloader)} batches of size {BATCH_SIZE}")
@@ -388,6 +416,7 @@ print(f"Length of test dataloader: {len(test_dataloader)} batches of size {BATCH
 #RNN
 
 results = []
+traininglog = []
 
 for seed in range(40,50):
     torch.manual_seed(seed)
@@ -440,17 +469,20 @@ for seed in range(40,50):
                 val_loss += loss_fn(val_pred, y).item()
         val_loss /= len(val_dataloader)
 
-        if epoch % 10 == 0:
-            print(f"Epoch: {epoch:3d} Train loss: {train_loss:.5f} Val loss: {val_loss:.5f}")
-
+        stopped = False
         if val_loss < best_val - 0.00001:
             best_val, bad = val_loss, 0
             torch.save(model_0.state_dict(), "best.pt")
         else:
             bad += 1
             if bad >= patience:
-                print(f"Early stop at epoch {epoch}, best validation loss at {best_val:.5f}")
-                break
+                stopped = True
+
+        traininglog.append({"seed": seed, "epoch": epoch,
+                            "train_loss": train_loss, "val_loss": val_loss,
+                            "early_stop": stopped})
+        if stopped:
+            break
 
     model_0.load_state_dict(torch.load("best.pt", weights_only= True))
 
@@ -477,6 +509,28 @@ resultsframe = pd.DataFrame(results)
 lstm_erroravg = resultsframe["Error %"].mean()
 lstm_rmsavg = resultsframe["RMS"].mean()
 
+print(f"LSTM (avg, seeds 40-49)Error % - {lstm_erroravg: .2f}% | RMS - {lstm_rmsavg:.2f}")
+
+### Plot LSTM loss curves
+logdf = pd.DataFrame(traininglog)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+for seed, g in logdf.groupby("seed"):
+    axes[0].plot(g["epoch"], g["train_loss"], alpha=0.5, label=f"seed {seed}")
+    axes[1].plot(g["epoch"], g["val_loss"],   alpha=0.5, label=f"seed {seed}")
+
+axes[0].set_title("Train loss"); axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("MSE (scaled)")
+axes[1].set_title("Validation loss"); axes[1].set_xlabel("Epoch")
+axes[1].legend(fontsize=7, ncol=2)
+fig.tight_layout()
+fig.savefig(os.path.join(imagesdir, "lstm_loss_curves.png"), dpi=150)
+plt.close(fig)
+
+print(f"\nTraining/Validation loss curves plotted, saved to 'lstm_loss_curves.png")
+
+
+
+
 summary = pd.DataFrame([
     {"Model": "Baseline (day)",           "Error %": basedayper,    "RMS": basedayrms},
     {"Model": "Baseline (week)",          "Error %": baseweekper,   "RMS": baseweekrms},
@@ -486,5 +540,13 @@ summary = pd.DataFrame([
 ])
 
 summary.to_csv(os.path.join(resultsdir, "model_summary.csv"), index=False)
+print(f"\nSummary results of models saved as 'model_summary.csv'")
 resultsframe.to_csv(os.path.join(resultsdir, "lstm_seed_results.csv"), index=False)
+print(f"LSTM model seed variation results saved as 'lst_seed_results.csv'")
+pd.DataFrame(traininglog).to_csv(os.path.join(resultsdir, "lstm_training_log.csv"), index=False)
+print(f"LSTM training log data saved as 'lst_training_log.csv'")
+
 rolltable.to_csv(os.path.join(resultsdir, "rolling_monthly_results.csv"))
+print(f"Grad Boost rolling test data from Jan '25 to Jun '26 saved as 'rolling_monthly_results.csv'")
+context.sort_values("ape", ascending=False).head(10).to_csv(os.path.join(resultsdir, "XGB_Top_Outliers.csv"))
+print(f"XGB: Top 10 Days disparate from models prediction saved as 'XGB_Top_10_Outliers.csv'")

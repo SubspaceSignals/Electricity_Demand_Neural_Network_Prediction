@@ -1,8 +1,16 @@
-*
-!main.py
-!README.md
-!requirements.txt
-!image.png
-!image-1.png
-!image-2.png
-!.gitignore
+/*
+!/Data - National Demand/
+!/Data - Weather/
+/Data - National Demand/*
+!/Data - National Demand/.gitkeep
+/Data - Weather/*
+!/Data - Weather/.gitkeep
+!/Images/
+!/Results/
+
+
+!/main.py
+!/README.md
+!/requirements.txt
+!/.gitignore
+!/LICENSE
